@@ -1,0 +1,4 @@
+chipset_qemu/
+├── chipset_init_qemu.c    ← The C source code
+├── linker.ld              ← The linker script  
+└── Makefile               ← The build file

@@ -1,0 +1,17 @@
+========================================
+  QEMU Q35 Chipset Initialization
+========================================
+
+[INIT] Serial console online.
+[INIT] Initializing 8259 PIC...
+[INIT] PIC initialized (remapped to 0x20-0x2F).
+[INIT] Initializing 8254 PIT...
+[INIT] PIT initialized (~1000 Hz).
+[INIT] Configuring ACPI PM base...
+[INIT] ACPI PM base set to 0x600.
+[PCI] Scanning PCI bus...
+  Slot 0x00: Vendor=0x8086 Class=0x06
+  ...
+[INIT] Chipset initialization complete!
+[INIT] System ready.
+========================================
