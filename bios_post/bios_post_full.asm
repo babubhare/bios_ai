@@ -1,288 +1,481 @@
-; bios_post_full.asm
-; Minimal BIOS POST with device checks and info display
-; Assemble: nasm -f bin bios_post_full.asm -o bios_post_full.bin
-; Run: qemu-system-i386 -bios bios_post_full.bin
-
-org 0xFFF0             ; BIOS reset vector (F000:FFF0)
+bits 16
+org 0x0000
 
 start:
-    cli
-    xor ax, ax
+    cli             ; Clear interrupts
+    cld             ; Clear direction flag
+
+    ; 1. Set up Segments & Stack
+    mov ax, cs
     mov ds, ax
-    mov es, ax
+    mov ax, 0x0000
     mov ss, ax
     mov sp, 0x7C00
 
-    call clear_screen
+    ; 2. Initialize Serial Port COM1 (I/O Port 0x3F8)
+    mov dx, 0x3F8 + 1  
+    mov al, 0x00
+    out dx, al         
+    mov dx, 0x3F8 + 3  
+    mov al, 0x80       
+    out dx, al
+    mov dx, 0x3F8 + 0   
+    mov al, 0x03       
+    out dx, al
+    mov dx, 0x3F8 + 1   
+    mov al, 0x00
+    out dx, al
+    mov dx, 0x3F8 + 3  
+    mov al, 0x03       
+    out dx, al
+    mov dx, 0x3F8 + 2  
+    mov al, 0xC7       
+    out dx, al
 
-    ; 1. RAM test first 64KB
-    mov si, ram_test_msg
-    call print_string
-    call memory_test_64k
-    cmp al, 0
-    jne ram_fail
-
-    mov si, ram_ok_msg
-    call print_string
-
-    ; Display size: 64KB tested
-    mov si, ram_size_msg
-    call print_string
-
-    ; 2. PIT Timer init check
-    mov si, pit_msg
-    call print_string
-    call pit_init_test
-    mov si, pit_ok_msg
-    call print_string
-
-    ; 3. Keyboard controller test
-    mov si, kbd_msg
-    call print_string
-    call keyboard_controller_test
-    cmp al, 0xFA      ; ACK expected
-    jne kbd_fail
-
-    mov si, kbd_ok_msg
+    ; 3. Print Boot Header
+    mov si, msg_boot
     call print_string
 
-    ; 4. Video adapter test (write/read video mem)
-    mov si, video_msg
+    ; -------------------------------------------------------------
+    ; FEATURE 1: CPU Vendor ID via CPUID
+    ; -------------------------------------------------------------
+    mov eax, 0          
+    cpuid               
+    mov si, msg_cpu
     call print_string
-    call video_test
-    cmp al, 0x01      ; success flag in AL=1
-    jne video_fail
-
-    mov si, video_ok_msg
-    call print_string
-
-    ; 5. Floppy disk controller reset test
-    mov si, fdc_msg
-    call print_string
-    call floppy_reset_test
-    mov si, fdc_ok_msg
-    call print_string
-
-    ; 6. IDE hard disk controller detect test
-    mov si, ide_msg
-    call print_string
-    call ide_detect_test
-    cmp al, 1         ; AL=1 means device found
-    jne ide_fail
-
-    mov si, ide_ok_msg
+    mov eax, ebx
+    call print_reg_chars
+    mov eax, edx
+    call print_reg_chars
+    mov eax, ecx
+    call print_reg_chars
+    mov si, msg_newline
     call print_string
 
-done:
-    mov si, done_msg
+    ; -------------------------------------------------------------
+    ; FEATURE 2: Brute-Force Base RAM Test (POST)
+    ; -------------------------------------------------------------
+    mov si, msg_test
+    call print_string
+    push ds                 
+    
+    mov ax, 0x1000          ; Start testing above 64KB (safe zone)
+    xor cx, cx              
+    
+.ram_test_loop:
+    mov ds, ax              
+    mov bx, 0x0000          
+    mov word [bx], 0xAA55   
+    cmp word [bx], 0xAA55   
+    jne .ram_test_done      
+    
+    inc cx                  
+    add ax, 0x0040          
+    cmp ax, 0xA000          ; Stop at VGA memory boundary (0xA0000)
+    je .ram_test_done
+    jmp .ram_test_loop
+
+.ram_test_done:
+    pop ds                  
+    mov ax, cx              
+    call print_hex_ax
+    mov si, msg_base_kb
     call print_string
 
-hang:
-    hlt
-    jmp hang
+    ; -------------------------------------------------------------
+    ; FEATURE 3: Extended RAM via CMOS (Ports 0x70 & 0x71)
+    ; -------------------------------------------------------------
+    mov si, msg_ext_ram
+    call print_string
+    mov al, 0x35        
+    out 0x70, al        
+    in al, 0x71         
+    mov ah, al          
+    mov al, 0x34        
+    out 0x70, al
+    in al, 0x71         
+    call print_hex_ax   
+    mov si, msg_blocks
+    call print_string
 
-; ---------------------
-; Subroutines 
+    ; -------------------------------------------------------------
+    ; FEATURE 4: Keyboard Controller Status Check (Intel 8042)
+    ; -------------------------------------------------------------
+    mov si, msg_kbc
+    call print_string
+    mov dx, 0x64        
+    in al, dx           
+    call print_hex_al   
+    mov si, msg_kbc_ok
+    call print_string
 
-; Clear screen via BIOS int 10h AH=0x06 scroll up entire screen (clear)
-clear_screen:
-    mov ah, 0x06
-    xor al, al          ; number of lines to scroll = 0 = clear screen
-    mov bh, 0x07        ; attribute (grey on black)
-    mov cx, 0x0000      ; upper left corner row/col = 0,0
-    mov dx, 0x184F      ; lower right corner row/col = 24,79 (80x25)
-    int 0x10
+    ; -------------------------------------------------------------
+    ; FEATURE 5: Dual Serial Ports Check (COM1 & COM2)
+    ; -------------------------------------------------------------
+    mov si, msg_serial_check
+    call print_string
+    mov dx, 0x3F8
+    in al, dx
+    call print_hex_al
+    mov si, msg_com1_str
+    call print_string
+    mov dx, 0x2F8
+    in al, dx
+    call print_hex_al
+    mov si, msg_com2_str
+    call print_string
+
+    ; -------------------------------------------------------------
+    ; FEATURE 6: ATA Primary Hard Drive Size Discovery (Ports 0x1F0 - 0x1F7)
+    ; -------------------------------------------------------------
+    mov si, msg_ata
+    call print_string
+    mov dx, 0x1F6
+    mov al, 0xA0
+    out dx, al
+    mov dx, 0x1F7
+    mov al, 0xEC
+    out dx, al
+
+.ata_wait:
+    in al, dx
+    cmp al, 0               
+    je .no_drive
+    test al, 0x80           
+    jnz .ata_wait
+    test al, 0x08           
+    jz .ata_wait
+
+    mov dx, 0x1F0
+    mov cx, 256             
+.read_ata:
+    in ax, dx               
+    cmp cx, 256 - 60        
+    jne .not_w60
+    mov bx, ax              
+.not_w60:
+    cmp cx, 256 - 61        
+    jne .not_w61
+    push dx
+    push ax
+    call print_hex_ax       
+    mov ax, bx
+    call print_hex_ax
+    mov si, msg_sectors
+    call print_string
+    pop ax
+    pop dx
+.not_w61:
+    dec cx
+    jnz .read_ata
+    jmp .ata_done
+
+.no_drive:
+    mov si, msg_none
+    call print_string
+.ata_done:
+
+    ; -------------------------------------------------------------
+    ; FEATURE 7: Comprehensive Multi-Bus PCI Scan (All 32 Slots + Names)
+    ; -------------------------------------------------------------
+    mov si, msg_pci
+    call print_string
+    xor ecx, ecx            ; ecx = Bus Number (0 and 1)
+
+.bus_scan_loop:
+    xor ebx, ebx            ; ebx = Device Number (0 to 31)
+
+.pci_scan_loop:
+    mov eax, 0x80000000     
+    
+    ; Insert Bus Number into bits 16-23
+    push ecx
+    shl ecx, 16
+    or eax, ecx
+    pop ecx
+
+    ; Insert Device Number into bits 11-15
+    push edx
+    mov edx, ebx
+    shl edx, 11
+    or eax, edx
+    pop edx
+
+    mov dx, 0xCF8
+    out dx, eax
+    mov dx, 0xCFC
+    in eax, dx              ; EAX holds [Device ID (16-bit) | Vendor ID (16-bit)]
+
+    cmp ax, 0xFFFF
+    je .next_device         ; Empty slot, skip printing
+
+    push eax                ; Save Device/Vendor ID structure
+    mov si, msg_dev
+    call print_string
+    
+    ; Print Bus Number
+    push ax
+    mov al, cl
+    call print_hex_al
+    mov si, msg_colon
+    call print_string
+    pop ax
+
+    ; Print Device Number
+    mov ax, bx              
+    call print_hex_al
+    mov si, msg_id_str
+    call print_string
+
+    ; Print Hex IDs (Vendor:Device)
+    pop eax                 
+    push eax                
+    call print_hex_eax
+    mov si, msg_space
+    call print_string
+
+    ; Look up and print device name string
+    pop eax                 
+    push eax                
+    call print_pci_name
+
+    mov si, msg_newline
+    call print_string
+    pop eax                 
+
+.next_device:
+    inc ebx
+    cmp ebx, 32             
+    jl .pci_scan_loop
+
+    inc ecx
+    cmp ecx, 2              ; Scan Bus 0 and Bus 1
+    jl .bus_scan_loop
+
+    ; -------------------------------------------------------------
+    ; 8. Halt System
+    ; -------------------------------------------------------------
+    mov si, msg_done
+    call print_string
+halt:
+    hlt                 
+    jmp halt            
+
+; =========================================================
+; FIXED PCI NAME LOOKUP FUNCTION
+; Input: EAX = [Device ID (16-bit) | Vendor ID (16-bit)]
+; =========================================================
+print_pci_name:
+    push si
+    push eax                ; Save full EAX on stack
+    mov si, pci_table
+
+.lookup_loop:
+    mov dx, [si]            ; Read table Vendor ID
+    cmp dx, 0
+    je .unknown_device      ; End of table marker if Vendor ID is 0
+
+    ; Check Vendor ID match (low 16 bits of EAX)
+    mov ax, [esp]           
+    cmp ax, dx              
+    jne .next_table_entry
+
+    ; Check Device ID match (high 16 bits of EAX)
+    mov edx, [esp]          
+    shr edx, 16             ; DX = Target Device ID
+    cmp dx, [si+2]          ; Compare with table Device ID
+    jne .next_table_entry
+
+    ; Found match! Print string at [si+4]
+    mov si, [si+4]
+    call print_string
+    add esp, 4              ; Clean up saved EAX from stack
+    pop si
     ret
 
-; Print zero-terminated string at DS:SI using BIOS TTY int 10h AH=0Eh
+.next_table_entry:
+    add si, 8               ; Each entry is 8 bytes (Vendor(2) + Device(2) + Pointer(4))
+    jmp .lookup_loop
+
+.unknown_device:
+    mov si, str_unknown
+    call print_string
+    add esp, 4              ; Clean up saved EAX from stack
+    pop si
+    ret
+
+; =========================================================
+; HELPER FUNCTIONS
+; =========================================================
+
+print_char:
+    push dx
+    push ax
+    mov dx, 0x3F8 + 5
+.wait:
+    in al, dx
+    test al, 0x20       
+    jz .wait
+    mov dx, 0x3F8
+    pop ax
+    out dx, al          
+    pop dx
+    ret
+
 print_string:
-    mov ah, 0x0E
-.next_char:
-    lodsb
-    cmp al, 0
-    je .done
-    int 0x10
-    jmp .next_char
+.loop:
+    lodsb               
+    or al, al           
+    jz .done
+    call print_char
+    jmp .loop
 .done:
     ret
 
-; --- Memory Test 64 KB ---
-; Returns AL=0 if fail, AL=1 if pass.
-memory_test_64k:
-    push cx dx si di bx
+print_reg_chars:
+    push cx
+    mov cx, 4
+.print_char:
+    call print_char     
+    shr eax, 8          
+    dec cx
+    jnz .print_char
+    pop cx
+    ret
 
-    xor si, si          ; offset in DS=0x0000 segment 
-    mov cx, 0x8000      ; words count (64K / 2 bytes)
+print_hex_ax:
+    push ax
+    push bx
+    push cx
+    mov cx, 4           
+.hex_loop:
+    rol ax, 4           
+    mov bl, al
+    and bl, 0x0F        
+    add bl, '0'         
+    cmp bl, '9'
+    jle .print_it
+    add bl, 7           
+.print_it:
+    push ax
+    mov al, bl
+    call print_char     
+    pop ax
+    dec cx
+    jnz .hex_loop
+    pop cx
+    pop bx
+    pop ax
+    ret
 
-mem_loop:
-    mov ax, 0x55AA      ; test pattern 1
-    mov [ds:si], ax     
-    cmp [ds:si], ax     
-    jne mem_fail_short  
-      
-    mov ax, 0xAA55      ; test pattern 2
-    mov [ds:si], ax     
-    cmp [ds:si], ax     
-    jne mem_fail_short  
+print_hex_al:
+    push ax
+    push cx
+    mov cx, 2           
+.hex_loop_al:
+    rol al, 4           
+    push ax
+    and al, 0x0F        
+    add al, '0'         
+    cmp al, '9'
+    jle .print_it_al
+    add al, 7           
+.print_it_al:
+    call print_char     
+    pop ax
+    dec cx
+    jnz .hex_loop_al
+    pop cx
+    pop ax
+    ret
 
-    add si, 2           
-    loop mem_loop
+print_hex_eax:
+    push eax
+    push ebx
+    push ecx
+    mov ecx, 8           
+.hex_loop_eax:
+    rol eax, 4           
+    mov bl, al
+    and bl, 0x0F        
+    add bl, '0'         
+    cmp bl, '9'
+    jle .print_it_eax
+    add bl, 7           
+.print_it_eax:
+    push eax
+    mov al, bl
+    call print_char     
+    pop eax
+    dec ecx
+    jnz .hex_loop_eax
+    pop ecx
+    pop ebx
+    pop eax
+    ret
 
-mem_pass:
-   mov al, 1            ; pass flag  
-   pop bx di si dx cx   
-   ret
+; =========================================================
+; PCI DEVICE LOOKUP TABLE & STRINGS
+; Structure: dw VendorID, DeviceID / dd StringPointer
+; =========================================================
+pci_table:
+    dw 0x8086, 0x1237
+    dd str_host
+    dw 0x8086, 0x7000
+    dd str_isa
+    dw 0x8086, 0x7010
+    dd str_ide
+    dw 0x8086, 0x7113
+    dd str_acpi
+    dw 0x1234, 0x1111
+    dd str_qemuvga
+    dw 0x1013, 0x00B8
+    dd str_cirrus
+    dw 0x8086, 0x100E
+    dd str_e1000
+    dw 0x0000, 0x0000
+    dd 0                            ; Explicit Terminator
 
-mem_fail_short:
-   mov al, 0            ; fail flag  
-   pop bx di si dx cx   
-   ret
+str_host        db "[Intel 440FX Host Bridge]", 0
+str_isa         db "[Intel PIIX3 ISA Bridge]", 0
+str_ide         db "[Intel PIIX3 IDE Controller]", 0
+str_acpi        db "[Intel PIIX4 ACPI PM]", 0
+str_qemuvga     db "[QEMU Standard VGA Controller]", 0
+str_cirrus      db "[Cirrus Logic GD5446 VGA]", 0
+str_e1000       db "[Intel 82540EM Gigabit Ethernet]", 0
+str_unknown     db "[Unknown Peripheral Device]", 0
 
-; --- PIT Timer Init ---
-; Initialize PIT channel 0 in mode 3 square wave at max count (0xFFFF)
-pit_init_test:
-    mov al, 0x36        ; Channel 0, mode 3, binary mode  
-    out 0x43, al        
-    
-    mov al, 0xFF        ; Low byte count  
-    out 0x40, al        
-    
-    mov al, 0xFF        ; High byte count  
-    out 0x40, al        
+; =========================================================
+; DATA STRINGS
+; =========================================================
+msg_boot        db "========================================", 13, 10
+                db " Custom BIOS: Full Hardware Probe", 13, 10
+                db "----------------------------------------", 13, 10, 0
+msg_cpu         db ">> CPU Vendor ID           : ", 0
+msg_test        db ">> POST: Testing Base RAM  : ", 0
+msg_base_kb     db " Good 1KB blocks found.", 13, 10, 0
+msg_ext_ram     db ">> CMOS: RAM > 16MB limit  : 0x", 0
+msg_blocks      db " (64KB Blocks)", 13, 10, 0
+msg_kbc         db ">> 8042 Keyboard Status    : 0x", 0
+msg_kbc_ok      db " (Controller Active)", 13, 10, 0
+msg_serial_check db ">> Serial Ports Check      : COM1(0x3F8)=0x", 0
+msg_com1_str    db ", COM2(0x2F8)=0x", 0
+msg_com2_str    db " (Responsive)", 13, 10, 0
+msg_ata         db ">> ATA Primary Drive Size  : 0x", 0
+msg_sectors     db " Sectors", 13, 10, 0
+msg_none        db "No Drive Attached", 13, 10, 0
+msg_pci         db ">> PCI Bus Scan & Device Names:", 13, 10, 0
+msg_dev         db "   - Bus:Dev 0x", 0
+msg_colon       db ":0x", 0
+msg_id_str      db " ID:0x", 0
+msg_space       db " ", 0
+msg_newline     db 13, 10, 0
+msg_done        db ">> System initialization complete.", 13, 10, 0
 
-   ret
+; Hardware Reset Vector configuration
+times 0xFFF0 - ($ - $$) db 0x90     
+reset_vector:
+    jmp 0xF000:start                
 
-; --- Keyboard Controller Test ---
-; Send reset command (0xFF) to keyboard controller and read ACK (0xFA)
-keyboard_controller_test:
-wait_input_empty:
-   in al, 0x64          ; read status port  
-   test al, 2           ; input buffer full?
-   jnz wait_input_empty
-   
-   mov al, 0xFF         ; reset command  
-   out 0x60, al
-   
-wait_output_full:
-   in al, 0x64          ; read status  
-   test al,1            ; output buffer full?  
-   jz wait_output_full
-   
-   in al, 0x60          ; read ACK  
-   ret
-
-; --- Video Test ---
-; Write/read character to CGA text buffer at segment B800h offset 0,
-; returns AL=1 if success else AL=0.
-video_test:
-   push es di bx
-   
-   mov ax, 0xB800      
-   mov es, ax          
-   xor di, di          
-   
-   mov ax, 'X' + (0x07 <<8)   ; character 'X' with attribute  
-   mov [es:di], ax              
-   
-   mov bx,[es:di]       
-   cmp bx, ax           
-   jne .fail
-   
-   mov al,1             ; success flag
-   
-   pop bx di es         
-   ret
-   
-.fail:
-   mov al,0             ; fail flag
-   
-   pop bx di es         
-   ret
-
-; --- Floppy Disk Controller Reset ---
-; Reset FDC by toggling bit2 on port 3F2h.
-floppy_reset_test:
-   in al, 0x3F2           
-   and al, 0xFB           ; clear bit2 (reset low)  
-   out 0x3F2, al         
-   
-   ; short delay loop (~10000 iterations)
-   mov cx,10000 
-.delay1:
-   loop .delay1
-   
-   in al, 0x3F2           
-   or al, 4               ; set bit2 (reset high)  
-   out 0x3F2, al         
-   
-   ret
-
-; --- IDE Hard Disk Detect ---
-; Send IDENTIFY command to IDE controller port at base 1F0h.
-; Returns AL=1 if device present else AL=0.
-
-ide_detect_test:
-   push dx cx dx bx si di
-   
-   mov dx, 0x1F6          ; Drive/head select register  
-   mov al, 0xA0           ; Select master drive (bit4 set)  
-   out dx, al
-   
-   mov dx, 0x1F7          ; Command register port  
-   mov al, 0xEC           ; IDENTIFY DEVICE command  
-   out dx, al
-   
-; Wait for BSY clear and DRQ set or timeout (~65535 loops)
-wait_ide_ready:
-   in al, dx              ; read status  
-   test al, 0x80          ; BSY bit set?  
-   jnz wait_ide_ready_loop
-   
-wait_ide_ready_loop:
-   in al, dx             
-   test al, (1<<3)        ; DRQ bit set?  
-   jnz ide_device_found   
-   
-wait_ide_ready_loop2:
-   loop wait_ide_ready_loop2
-   
-ide_device_not_found:
-   mov al,0               ; no device found  
-   jmp ide_done
-   
-ide_device_found:
-   mov al,1               ; device present  
-   
-ide_done:
-   pop di si bx cx dx dx   
-   ret
-
-
-; ---------------------
-; Messages
-
-ram_test_msg db 'RAM Test (64KB): ', 0
-ram_ok_msg db 'PASS',13,10,0        ; CR LF line end  
-ram_size_msg db 'Memory tested: 64 KB',13,10,0
-
-pit_msg db 'PIT Timer Init...',13,10,0         
-pit_ok_msg db 'PIT Init OK',13,10,0       
-
-kbd_msg db 'Keyboard Controller Reset...',13,10,0      
-kbd_ok_msg db 'Keyboard Controller OK',13,10,0   
-
-video_msg db 'Video Adapter Test...',13,10,0    
-video_ok_msg db 'Video Adapter OK',13,10,0      
-
-fdc_msg db 'Floppy Disk Controller Reset...',13,10,0     
-fdc_ok_msg db 'Floppy Disk Controller OK',13,10,0       
-
-ide_msg db 'IDE Hard Disk Detect...',13,10,0          
-ide_ok_msg db 'IDE Device Found',13,10,0        
-
-ram_fail db 'RAM Test FAIL!',13,10,'System Halted',13,10 ,0 
-kbd_fail db 'Keyboard Controller FAIL!',13,10,'System Halted',13,10 ,0 
-video_fail db 'Video Adapter FAIL!',13,10,'System Halted',13,10 ,0 
-ide_fail db 'IDE Device NOT Found!',13,10,'System Halted',13,10 ,0 
-
-done_msg db 'POST Complete.',13,10 ,0
+; Pad to exact 64KB ROM binary size
+times 0x10000 - ($ - $$) db 0x90

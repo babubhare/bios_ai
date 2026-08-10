@@ -2,9 +2,10 @@
 
 ASM = nasm
 ASM_FLAGS = -f bin
+#SRC = bios_post_serial.asm
 SRC = bios_post_full.asm
-OUT = bios_post_full.bin
-
+#OUT = bios_post_serial.bin
+OUT = bios.bin
 all: $(OUT)
 
 $(OUT): $(SRC)
