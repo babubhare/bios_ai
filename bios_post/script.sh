@@ -1,0 +1,1 @@
+qemu-system-i386 -bios bios_post_full.bin
