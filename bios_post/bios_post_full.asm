@@ -1,6 +1,10 @@
 bits 16
 org 0x0000
 
+; Target PCI Device for BAR Test: Bus 0, Device 3, Function 0, Register 0x10 (BAR0)
+; Format: Enable Bit(31) | Bus(23-16) | Dev(15-11) | Func(10-8) | Reg(7-2)
+PCI_TARGET_BAR0 equ 0x80001810 
+
 start:
     cli             ; Clear interrupts
     cld             ; Clear direction flag
@@ -37,7 +41,7 @@ start:
     call print_string
 
     ; -------------------------------------------------------------
-    ; FEATURE 1: CPU Vendor ID via CPUID
+    ; FEATURE 1A: CPU Vendor ID via CPUID (EAX=0)
     ; -------------------------------------------------------------
     mov eax, 0          
     cpuid               
@@ -49,6 +53,49 @@ start:
     call print_reg_chars
     mov eax, ecx
     call print_reg_chars
+    mov si, msg_newline
+    call print_string
+
+    ; -------------------------------------------------------------
+    ; FEATURE 1B: CPU Brand String & Speed (EAX=0x80000002-4)
+    ; -------------------------------------------------------------
+    ; First, check if the CPU supports extended CPUID functions
+    mov eax, 0x80000000
+    cpuid
+    cmp eax, 0x80000004
+    jb .skip_brand          ; If it doesn't support up to 0x80000004, skip this
+
+    mov si, msg_brand
+    call print_string
+
+    mov eax, 0x80000002
+    cpuid
+    call print_brand_chunk
+
+    mov eax, 0x80000003
+    cpuid
+    call print_brand_chunk
+
+    mov eax, 0x80000004
+    cpuid
+    call print_brand_chunk
+
+    mov si, msg_newline
+    call print_string
+.skip_brand:
+
+    ; -------------------------------------------------------------
+    ; FEATURE 1C: Logical Core Count (EAX=1)
+    ; -------------------------------------------------------------
+    mov eax, 1
+    cpuid
+    shr ebx, 16             ; Shift EBX right by 16 bits to get logical CPU count in BL
+    mov si, msg_cores
+    call print_string
+    mov al, bl
+    call print_hex_al       ; Print the core count in HEX
+    mov si, msg_newline
+    call print_string
     mov si, msg_newline
     call print_string
 
@@ -253,7 +300,52 @@ start:
     jl .bus_scan_loop
 
     ; -------------------------------------------------------------
-    ; 8. Halt System
+    ; FEATURE 8: PCI Base Address Register (BAR) Sizing Handshake
+    ; -------------------------------------------------------------
+    mov si, msg_bar_start
+    call print_string
+
+    ; STEP 1: Read Original BAR Value
+    mov si, msg_bar_orig
+    call print_string
+    mov eax, PCI_TARGET_BAR0
+    call read_pci
+    mov edi, eax            ; Save original BAR into EDI
+    call print_hex_eax      ; Print original value
+    mov si, msg_newline
+    call print_string
+
+    ; STEP 2: Write "All-Ones" (0xFFFFFFFF) to the BAR
+    mov eax, PCI_TARGET_BAR0
+    mov ebx, 0xFFFFFFFF
+    call write_pci
+
+    ; STEP 3: Read back the Sizing Mask
+    mov si, msg_bar_mask
+    call print_string
+    mov eax, PCI_TARGET_BAR0
+    call read_pci
+    call print_hex_eax      ; Print the mask
+    mov si, msg_newline
+    call print_string
+
+    ; STEP 4: Restore Original BAR Value
+    mov eax, PCI_TARGET_BAR0
+    mov ebx, edi            ; EDI holds the original value
+    call write_pci
+
+    ; Confirm Restoration
+    mov si, msg_bar_restored
+    call print_string
+    mov eax, PCI_TARGET_BAR0
+    call read_pci
+    call print_hex_eax
+    mov si, msg_newline
+    call print_string
+
+
+    ; -------------------------------------------------------------
+    ; 9. Halt System
     ; -------------------------------------------------------------
     mov si, msg_done
     call print_string
@@ -307,6 +399,42 @@ print_pci_name:
 ; =========================================================
 ; HELPER FUNCTIONS
 ; =========================================================
+
+; Helper to print 16 bytes of CPUID brand string returned in EAX, EBX, ECX, EDX
+print_brand_chunk:
+    push eax
+    call print_reg_chars
+    mov eax, ebx
+    call print_reg_chars
+    mov eax, ecx
+    call print_reg_chars
+    mov eax, edx
+    call print_reg_chars
+    pop eax
+    ret
+
+; Reads a 32-bit DWORD from PCI. Input: EAX = Address. Output: EAX = Data
+read_pci:
+    push dx
+    mov dx, 0xCF8
+    out dx, eax
+    mov dx, 0xCFC
+    in eax, dx
+    pop dx
+    ret
+
+; Writes a 32-bit DWORD to PCI. Input: EAX = Address, EBX = Data to write
+write_pci:
+    push dx
+    push eax
+    mov dx, 0xCF8
+    out dx, eax
+    mov dx, 0xCFC
+    mov eax, ebx
+    out dx, eax
+    pop eax
+    pop dx
+    ret
 
 print_char:
     push dx
@@ -452,6 +580,8 @@ msg_boot        db "========================================", 13, 10
                 db " Custom BIOS: Full Hardware Probe", 13, 10
                 db "----------------------------------------", 13, 10, 0
 msg_cpu         db ">> CPU Vendor ID           : ", 0
+msg_brand       db ">> CPU Brand & Speed       : ", 0
+msg_cores       db ">> Logical Core Count      : 0x", 0
 msg_test        db ">> POST: Testing Base RAM  : ", 0
 msg_base_kb     db " Good 1KB blocks found.", 13, 10, 0
 msg_ext_ram     db ">> CMOS: RAM > 16MB limit  : 0x", 0
@@ -470,6 +600,12 @@ msg_colon       db ":0x", 0
 msg_id_str      db " ID:0x", 0
 msg_space       db " ", 0
 msg_newline     db 13, 10, 0
+
+msg_bar_start    db ">> PCI BAR Sizing (Bus 0, Dev 3, BAR0):", 13, 10, 0
+msg_bar_orig     db "   - Original BAR Value: 0x", 0
+msg_bar_mask     db "   - BAR Size Mask     : 0x", 0
+msg_bar_restored db "   - Restored BAR Value: 0x", 0
+
 msg_done        db ">> System initialization complete.", 13, 10, 0
 
 ; Hardware Reset Vector configuration
